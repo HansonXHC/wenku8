@@ -1,0 +1,5 @@
+requests>=2.31
+curl_cffi>=0.7
+cloudscraper>=1.2
+ebooklib>=0.18
+dearpygui>=2.3

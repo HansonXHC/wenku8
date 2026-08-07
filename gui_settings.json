@@ -1,0 +1,34 @@
+{
+  "lang": "en",
+  "theme": "dark",
+  "width": 1180,
+  "height": 760,
+  "dl": {
+    "spec": "1-1000",
+    "outdir": "",
+    "threads": 32,
+    "engine": "auto",
+    "timeout": 30,
+    "retries": 3,
+    "delay": 0.0,
+    "cookie": "",
+    "overwrite": false,
+    "config": "I:\\wenku8\\config.ini"
+  },
+  "build": {
+    "txt": "",
+    "out": "",
+    "aid": "",
+    "engine": "auto",
+    "workers": 3,
+    "delay": 0.0,
+    "rpm": 60,
+    "cache": "",
+    "jar": "",
+    "cover": "auto",
+    "epubcheck": "",
+    "resume": true,
+    "scanall": false,
+    "nocover": false
+  }
+}
