@@ -126,7 +126,7 @@ _T = {
     "tab.build":       {"en": "EPUB Builder", "zh": "EPUB 生成"},
     # 下载器
     "dl.settings":     {"en": "Settings", "zh": "设置"},
-    "dl.spec":         {"en": "Book range (e.g. 1-1000)", "zh": "书籍范围（如 1-1000）"},
+    "dl.spec":         {"en": "Book range (e.g. 1-1000, 5,68)", "zh": "书籍范围（如 1-1000、5,68）"},
     "dl.outdir":       {"en": "Output folder", "zh": "输出文件夹"},
     "dl.browse":       {"en": "Browse", "zh": "浏览"},
     "dl.threads":      {"en": "Threads", "zh": "线程数"},
@@ -134,6 +134,7 @@ _T = {
     "dl.timeout":      {"en": "Timeout (s)", "zh": "超时（秒）"},
     "dl.retries":      {"en": "Retries", "zh": "重试次数"},
     "dl.delay":        {"en": "Request delay (s)", "zh": "请求间隔（秒）"},
+    "dl.rpm":          {"en": "Requests / min", "zh": "每分钟请求上限"},
     "dl.cookie":       {"en": "Cookie (optional)", "zh": "Cookie（可选）"},
     "dl.overwrite":    {"en": "Overwrite existing files", "zh": "覆盖已存在文件"},
     "dl.config":       {"en": "Config file", "zh": "配置文件"},
@@ -503,8 +504,9 @@ def _write_config(path, spec):
         "threads = %d\n" % _get_int("in_dl_threads", 32)
         + "engine = %s\n" % _get_str("cmb_dl_engine")
         + "output_dir = %s\n" % out_dir
-        + "timeout = %d\n" % _get_int("in_dl_timeout", 30)
+        + "timeout = %d\n" % _get_int("in_dl_timeout", 120)
         + "retries = %d\n" % _get_int("in_dl_retries", 3)
+        + "req_per_min = %d\n" % _get_int("in_dl_rpm", 40)
         + "request_delay = %s\n" % _get_float("in_dl_delay", 0.0)
         + "cookie = %s\n" % _get_str("in_dl_cookie")
     )
@@ -642,8 +644,8 @@ def _default_settings():
         "width": 1180,
         "height": 760,
         "dl": {
-            "spec": "1-1000", "outdir": "", "threads": 32, "engine": "auto",
-            "timeout": 30, "retries": 3, "delay": 0.0, "cookie": "",
+            "spec": "1-1000", "outdir": "", "threads": 8, "engine": "auto",
+            "timeout": 120, "retries": 3, "delay": 0.0, "rpm": 40, "cookie": "",
             "overwrite": False, "config": "",
         },
         "build": {
@@ -680,8 +682,9 @@ def _save_settings():
     data["dl"] = {
         "spec": _get_str("in_dl_spec"), "outdir": _get_str("in_dl_outdir"),
         "threads": _get_int("in_dl_threads", 32), "engine": _get_str("cmb_dl_engine"),
-        "timeout": _get_int("in_dl_timeout", 30), "retries": _get_int("in_dl_retries", 3),
-        "delay": _get_float("in_dl_delay", 0.0), "cookie": _get_str("in_dl_cookie"),
+        "timeout": _get_int("in_dl_timeout", 120), "retries": _get_int("in_dl_retries", 3),
+        "delay": _get_float("in_dl_delay", 0.0), "rpm": _get_int("in_dl_rpm", 40),
+        "cookie": _get_str("in_dl_cookie"),
         "overwrite": _get_bool("chk_dl_overwrite"), "config": _get_str("in_dl_config"),
     }
     data["build"] = {
@@ -846,6 +849,9 @@ def _build_ui(settings):
                                 dpg.add_text(t("dl.delay"))
                                 dpg.add_input_float(tag="in_dl_delay", min_value=0.0, min_clamped=True, width=-1)
                             with dpg.table_row():
+                                dpg.add_text(t("dl.rpm"))
+                                dpg.add_input_int(tag="in_dl_rpm", min_value=1, min_clamped=True, width=-1)
+                            with dpg.table_row():
                                 dpg.add_text(t("dl.cookie"))
                                 dpg.add_input_text(tag="in_dl_cookie", width=-1)
                             with dpg.table_row():
@@ -965,6 +971,7 @@ def _build_ui(settings):
         ("dl.outdir", "in_dl_outdir"), ("dl.threads", "in_dl_threads"),
         ("dl.engine", "cmb_dl_engine"), ("dl.timeout", "in_dl_timeout"),
         ("dl.retries", "in_dl_retries"), ("dl.delay", "in_dl_delay"),
+        ("dl.rpm", "in_dl_rpm"),
         ("dl.cookie", "in_dl_cookie"), ("dl.config", "in_dl_config"),
         ("dl.overwrite", "chk_dl_overwrite"), ("dl.start", "btn_dl_start"),
         ("dl.cancel", "btn_dl_cancel"), ("bd.txt", "in_bd_txt"),
@@ -994,6 +1001,7 @@ def _restore_settings(settings):
     dpg.set_value("in_dl_timeout", dl["timeout"])
     dpg.set_value("in_dl_retries", dl["retries"])
     dpg.set_value("in_dl_delay", dl["delay"])
+    dpg.set_value("in_dl_rpm", dl["rpm"])
     dpg.set_value("in_dl_cookie", dl["cookie"])
     dpg.set_value("chk_dl_overwrite", dl["overwrite"])
     dpg.set_value("in_dl_config", dl["config"] or DEFAULT_CONFIG_PATH)

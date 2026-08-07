@@ -7,7 +7,7 @@ Tools for [wenku8](https://www.wenku8.cc/) (轻小说文库 / light-novel librar
 - `js插件/` — two independent Greasyfork userscripts (different authors; their code is intentionally not shared)
   - `轻小说文库+-2.31.2.js` — "轻小说文库+" by PY-DNG. All-encompassing site enhancement: reading, downloading, bookshelf, recommendations, reviews, accounts, page personalization, and more.
   - `轻小说文库下载-2.2.6.js` — "轻小说文库下载" by HaoaW. Builds per-volume / full-book ePub documents, drag-and-drop illustration placement, and online reading for some novels.
-- `download_novel.py` — **bulk wenku8 light-novel txt downloader**: simulated browser request headers, 32 threads by default, auto-retry on failure (3 by default), auto-skip 404s, Cloudflare engine fallback.
+- `download_novel.py` — **bulk wenku8 light-novel txt downloader**: simulated browser request headers, 8 threads + rate limiter (40 req/min) by default, auto-retry on failure (3 by default), auto-skip 404s, Cloudflare engine fallback.
 - `config.ini` — auto-generated on first run of `download_novel.py`; tune threads, retries, etc.
 - `build_epub.py` — **local txt → EPUB with illustrations** (the main tool here).
 - `requirements.txt` — Python dependencies for `build_epub.py`.
@@ -30,8 +30,9 @@ Standalone script that bulk-downloads light-novel txt files from `dl2.wenku8.com
 
 - **URL rule**: `https://dl2.wenku8.com/txtutf8/{id // 1000}/{id}.txt` — book 1 → `0/1.txt`, book 2676 → `2/2676.txt`.
 - **Simulated browser request headers** (Chrome UA + Referer) to pass basic anti-crawl.
-- **Multi-threaded**: 32 threads by default; prints the machine's CPU core count at startup.
+- **Multi-threaded**: 8 threads + global rate limiter (40 req/min by default); prints the machine's CPU core count at startup.
 - **Auto-retry on failure**: 3 attempts by default (exponential backoff); books that exhaust retries go to the failure list.
+- **Rate-limit protection**: on HTTP 429 it honors `Retry-After` and triggers a global cooldown to avoid a multi-thread retry storm; retries recover automatically.
 - **Auto-skip 404s**: links that genuinely don't exist are skipped without retrying.
 - **Cloudflare fallback**: on a detected CF challenge the engine auto-upgrades through `curl_cffi` → `requests` → `cloudscraper` (the `dl2` txt endpoint is verified to accept non-browser clients).
 - **Resume**: already-downloaded files are skipped by default; `--overwrite` forces re-download.
@@ -44,11 +45,12 @@ Auto-generated on first run (next to the script):
 
 | Key | Default | Description |
 |---|---|---|
-| `threads` | `32` | Download threads |
+| `threads` | `8` | Download threads |
 | `engine` | `auto` | `auto` / `curl_cffi` / `requests` / `cloudscraper` |
 | `output_dir` | `txt` | Output folder (relative to the script) |
-| `timeout` | `30` | Per-request timeout (seconds) |
+| `timeout` | `120` | Per-request timeout (seconds) |
 | `retries` | `3` | Retry count on download failure |
+| `req_per_min` | `40` | Global rate limit: max requests per minute |
 | `request_delay` | `0` | Extra delay between requests (seconds); raise when rate-limited |
 | `cookie` | *(empty)* | Paste browser-obtained cookies (e.g. `cf_clearance`) if Cloudflare blocks you |
 
@@ -57,6 +59,8 @@ Auto-generated on first run (next to the script):
 ```bash
 python download_novel.py -d 1             # download a single book
 python download_novel.py -d 1-1000        # download a range
+python download_novel.py -d 5,68          # download specific books
+python download_novel.py -d 1-10,20,30-35 # mixed: ranges + specific IDs
 python download_novel.py -d 1-5000 -c my.ini --overwrite
 ```
 
@@ -152,7 +156,7 @@ pip install dearpygui
 python wenku8_gui.py
 ```
 
-- Two tabs: **Downloader** (range spec, threads/engine/timeout, output dir, cookie, `--overwrite`) and **EPUB Builder** (txt file/folder, out dir, workers, rate limit, cover, epubcheck, resume/scan flags).
+- Two tabs: **Downloader** (range spec, threads/engine/rate limit/timeout, output dir, cookie, `--overwrite`) and **EPUB Builder** (txt file/folder, out dir, workers, rate limit, cover, epubcheck, resume/scan flags).
 - English/中文 switchable UI (default English) and dark/light themes, both in the `View` menu. Fonts auto-load from system CJK fonts.
 - Real-time progress bars (per-book + per-image) and a color-coded live log. Settings are remembered in `gui_settings.json` next to the script.
 - The scripts run **inside** the GUI (no subprocess); only one task runs at a time.

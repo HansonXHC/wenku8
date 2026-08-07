@@ -7,7 +7,7 @@
 - `js插件/` — 两个相互独立的 Greasyfork 用户脚本（不同作者，代码刻意不共享）
   - `轻小说文库+-2.31.2.js` —「轻小说文库+」by PY-DNG。全方位的站点体验改善：阅读、下载、书架、推荐、书评、账号、页面个性化等。
   - `轻小说文库下载-2.2.6.js` —「轻小说文库下载」by HaoaW。生成分卷与全本 ePub、插图拖放排版，以及部分小说的在线阅读。
-- `download_novel.py` — **wenku8 轻小说 txt 批量下载器**：模拟浏览器请求头、默认 32 线程、失败自动重试（默认 3 次）、404 自动跳过、Cloudflare 引擎兜底。
+- `download_novel.py` — **wenku8 轻小说 txt 批量下载器**：模拟浏览器请求头、默认 8 线程 + 限速（40 请求/分钟）、失败自动重试（默认 3 次）、404 自动跳过、Cloudflare 引擎兜底。
 - `config.ini` — 首次运行 `download_novel.py` 自动生成，可调整线程数、重试次数等。
 - `build_epub.py` — **本地 txt → 带插图 EPUB 生成器**（本仓库的核心工具）。
 - `requirements.txt` — `build_epub.py` 的 Python 依赖。
@@ -30,8 +30,9 @@
 
 - **链接规则**：`https://dl2.wenku8.com/txtutf8/{id // 1000}/{id}.txt`——第 1 本 → `0/1.txt`，第 2676 本 → `2/2676.txt`。
 - **模拟浏览器请求头**（Chrome UA + Referer），绕过基础反爬。
-- **多线程下载**：默认 32 线程，启动时打印本机 CPU 核心数。
+- **多线程下载**：默认 8 线程 + 全局限速（默认 40 请求/分钟），启动时打印本机 CPU 核心数。
 - **失败自动重试**：默认 3 次（指数退避），重试耗尽的书计入失败清单。
+- **限速保护**：被限速（HTTP 429）时尊重 `Retry-After` 并触发全局冷却，避免多线程惊群，重试可自动恢复。
 - **404 自动跳过**：链接确实不存在的书直接跳过，不重试。
 - **Cloudflare 兜底**：检测到 CF 挑战时自动在 `curl_cffi` → `requests` → `cloudscraper` 间升级引擎（`dl2` txt 端点实测不拦非浏览器客户端）。
 - **断点续下**：已存在的文件默认跳过，`--overwrite` 强制重下。
@@ -44,11 +45,12 @@
 
 | 配置项 | 默认 | 说明 |
 |---|---|---|
-| `threads` | `32` | 下载线程数 |
+| `threads` | `8` | 下载线程数 |
 | `engine` | `auto` | `auto` / `curl_cffi` / `requests` / `cloudscraper` |
 | `output_dir` | `txt` | 输出文件夹（相对脚本目录） |
-| `timeout` | `30` | 单请求超时（秒） |
+| `timeout` | `120` | 单请求超时（秒） |
 | `retries` | `3` | 下载失败重试次数 |
+| `req_per_min` | `40` | 全局限速：每分钟请求数上限 |
 | `request_delay` | `0` | 请求间附加延时（秒），被限速时可调大 |
 | `cookie` | （空） | 被 Cloudflare 拦截时填浏览器解出的 `cf_clearance` 等 cookie |
 
@@ -57,6 +59,8 @@
 ```bash
 python download_novel.py -d 1             # 下载单本
 python download_novel.py -d 1-1000        # 下载范围
+python download_novel.py -d 5,68          # 下载指定多本
+python download_novel.py -d 1-10,20,30-35 # 混合：范围 + 指定
 python download_novel.py -d 1-5000 -c my.ini --overwrite
 ```
 
@@ -152,7 +156,7 @@ pip install dearpygui
 python wenku8_gui.py
 ```
 
-- 两个页签：**下载器**（范围、线程/引擎/超时、输出目录、cookie、`--overwrite`）与 **EPUB 生成**（txt 文件/文件夹、输出目录、并发数、限速、封面、epubcheck、断点续跑/全量扫描等开关）。
+- 两个页签：**下载器**（范围、线程/引擎/限速/超时、输出目录、cookie、`--overwrite`）与 **EPUB 生成**（txt 文件/文件夹、输出目录、并发数、限速、封面、epubcheck、断点续跑/全量扫描等开关）。
 - 界面可切换**中英文**（默认英文）与**暗黑/明亮**主题（均在「视图」菜单），自动从系统加载中文字体。
 - **实时进度条**（书级 + 图片级）与着色日志。设置保存在脚本同目录的 `gui_settings.json`。
 - 两个脚本在 GUI **内部**运行（非子进程）；同一时刻只允许一个任务。

@@ -11,15 +11,18 @@ wenku8 轻小说 txt 批量下载器（纯 Python 单脚本）
 功能：
   1. 模拟浏览器请求头（Chrome UA + Referer）
   2. 输出到脚本同级目录下的 txt\ 文件夹（可用 config.ini 调整）
-  3. 多线程下载，默认 32 线程，可在 config.ini 修改
+  3. 多线程下载，默认 8 线程 + 全局限速（默认 40 请求/分钟），均可在 config.ini 修改
   4. 失败自动重试（默认 3 次，可在 config.ini 修改）
   5. HTTP 404 视为该书不存在，直接跳过
-  6. Cloudflare 兜底：curl_cffi -> requests -> cloudscraper 自动降级链
-  7. 已存在的文件默认跳过（断点续下），--overwrite 强制重下
+  6. 被限速(HTTP 429)时尊重 Retry-After 并触发全局冷却，避免多线程惊群
+  7. Cloudflare 兜底：curl_cffi -> requests -> cloudscraper 自动降级链
+  8. 已存在的文件默认跳过（断点续下），--overwrite 强制重下
 
 用法：
   python download_novel.py -d 1            # 下载单本
   python download_novel.py -d 1-1000       # 下载范围
+  python download_novel.py -d 5,68         # 下载指定多本
+  python download_novel.py -d 1-10,20,30-35  # 混合：范围 + 指定
   python download_novel.py -d 1-5000 -c my.ini --overwrite
 
 依赖：requests（curl_cffi / cloudscraper 可选，用于 Cloudflare 兜底）
@@ -46,11 +49,12 @@ CF_RE = re.compile(r"cf-chl|challenge-platform|cf-mitigated|Just a moment|__cf_c
 
 DEFAULT_CONFIG = """\
 [download]
-threads = 32        ; 下载线程数
+threads = 8         ; 下载线程数
 engine = auto       ; auto / curl_cffi / requests / cloudscraper
 output_dir = txt    ; 相对脚本所在目录的输出文件夹
-timeout = 30        ; 单请求超时(秒)
+timeout = 120       ; 单请求超时(秒)
 retries = 3         ; 下载失败重试次数
+req_per_min = 40    ; 全局限速：每分钟请求数上限
 request_delay = 0   ; 请求间附加延时(秒)，被限速时可调大
 cookie =            ; 可选：被 Cloudflare 拦截时填浏览器解出的 cf_clearance 等 cookie
 """
@@ -68,6 +72,34 @@ def log(msg, tag="INFO"):
             sys.stdout.flush()
         except Exception:
             pass
+
+
+# ---------------------------------------------------------------------------
+# 限速
+# ---------------------------------------------------------------------------
+class RateLimiter:
+    """令牌桶限速，rate_per_min 为每分钟请求数上限，burst 为突发容量。线程安全。"""
+
+    def __init__(self, rate_per_min, burst):
+        self._rate = max(rate_per_min, 1) / 60.0
+        self._cap = max(burst, 1)
+        self._tokens = float(self._cap)
+        self._last = time.monotonic()
+        self._lock = threading.Lock()
+
+    def acquire(self):
+        with self._lock:
+            now = time.monotonic()
+            self._tokens = min(self._cap, self._tokens + (now - self._last) * self._rate)
+            self._last = now
+            if self._tokens >= 1.0:
+                self._tokens -= 1.0
+                return
+            deficit = (1.0 - self._tokens) / self._rate
+            self._tokens = 0.0
+        time.sleep(deficit)
+        with self._lock:
+            self._last = time.monotonic()
 
 
 # ---------------------------------------------------------------------------
@@ -113,9 +145,10 @@ def _is_cf_challenge(status, content):
 
 
 class DownloadClient:
-    """多线程安全的 HTTP 客户端：每线程独立 Session + 全局引擎降级 + 重试。"""
+    """多线程安全的 HTTP 客户端：每线程独立 Session + 全局引擎降级 + 全局限速/冷却 + 重试。"""
 
-    def __init__(self, engine="auto", timeout=30, retries=3, cookie=""):
+    def __init__(self, engine="auto", timeout=120, retries=3, cookie="",
+                 req_per_min=40, workers=8):
         if engine == "auto":
             engine = "curl_cffi"
             try:
@@ -126,6 +159,9 @@ class DownloadClient:
         self._timeout = timeout
         self._retries = retries
         self._cookie = cookie
+        self._limiter = RateLimiter(req_per_min, max(workers * 4, 4))
+        self._cooldown_until = 0.0
+        self._cooldown_lock = threading.Lock()
         self._local = threading.local()
         self._idx_lock = threading.Lock()
 
@@ -157,6 +193,30 @@ class DownloadClient:
                 return True
             return False
 
+    def _wait_cooldown(self):
+        """任何线程被限速后，所有线程都暂停到冷却结束，避免惊群重试。"""
+        while True:
+            with self._cooldown_lock:
+                until = self._cooldown_until
+            now = time.monotonic()
+            if until <= now:
+                return
+            time.sleep(min(until - now, 1.0))
+
+    def _note_rate_limited(self, wait):
+        """记录一次全局限速：至少让全体冷却 10 秒，更长的按 wait 算。"""
+        with self._cooldown_lock:
+            self._cooldown_until = max(self._cooldown_until,
+                                       time.monotonic() + max(wait, 10))
+
+    @staticmethod
+    def _retry_after(resp):
+        try:
+            ra = resp.headers.get("Retry-After")
+        except Exception:
+            return 0
+        return int(ra) if ra and str(ra).isdigit() else 0
+
     @staticmethod
     def _atomic_write(path, data):
         tmp = path + ".tmp"
@@ -171,6 +231,8 @@ class DownloadClient:
         url = book_url(book_id)
         last_err = None
         for attempt in range(self._retries + 1):
+            self._wait_cooldown()
+            self._limiter.acquire()
             try:
                 resp = self._get(url, _browser_headers())
                 status = int(getattr(resp, "status_code", 0))
@@ -186,6 +248,14 @@ class DownloadClient:
                 elif status < 400:
                     self._atomic_write(out_path, content)
                     return "ok"
+                elif status == 429:
+                    wait = min(max(self._retry_after(resp), 5 * (2 ** attempt)), 60)
+                    last_err = "HTTP 429 限速"
+                    self._note_rate_limited(wait)
+                    log(f"book {book_id} 被限速(429)，全局冷却 {max(wait, 10)}s 后重试 {attempt + 1}/{self._retries}", "WARN")
+                    if attempt < self._retries:
+                        time.sleep(wait)
+                        continue
                 else:
                     last_err = f"HTTP {status}"
             except Exception as e:
@@ -201,18 +271,26 @@ class DownloadClient:
 # 参数 / 配置
 # ---------------------------------------------------------------------------
 def parse_spec(spec):
-    if "-" in spec:
-        left, right = spec.split("-", 1)
-        start, end = int(left), int(right)
-        if start < 1:
-            raise ValueError("起始 ID 必须 >= 1")
-        if end < start:
-            raise ValueError(f"结束 ID({end}) 不能小于起始 ID({start})")
-        return range(start, end + 1)
-    value = int(spec)
-    if value < 1:
-        raise ValueError("书籍 ID 必须 >= 1")
-    return range(value, value + 1)
+    """解析下载规格：单 ID(5)、区间(1-1000)、列表(5,68) 或混合(1-10,20,30-35)。返回去重保序的 ID 列表。"""
+    ids = []
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            raise ValueError(f"参数中包含空片段: {spec!r}")
+        if "-" in part:
+            left, right = part.split("-", 1)
+            start, end = int(left), int(right)
+            if start < 1:
+                raise ValueError(f"起始 ID({start}) 必须 >= 1")
+            if end < start:
+                raise ValueError(f"结束 ID({end}) 不能小于起始 ID({start})")
+            ids.extend(range(start, end + 1))
+        else:
+            value = int(part)
+            if value < 1:
+                raise ValueError(f"书籍 ID({value}) 必须 >= 1")
+            ids.append(value)
+    return list(dict.fromkeys(ids))
 
 
 def load_config(path):
@@ -225,11 +303,12 @@ def load_config(path):
         cfg.read(path, encoding="utf-8")
     sec = cfg["download"] if cfg.has_section("download") else {}
     return {
-        "threads": max(1, int(sec.get("threads", 32))),
+        "threads": max(1, int(sec.get("threads", 8))),
         "engine": sec.get("engine", "auto").strip().lower() or "auto",
         "output_dir": (sec.get("output_dir", "txt") or "txt").strip(),
-        "timeout": max(1, int(sec.get("timeout", 30))),
+        "timeout": max(1, int(sec.get("timeout", 120))),
         "retries": max(0, int(sec.get("retries", 3))),
+        "req_per_min": max(1, int(sec.get("req_per_min", 40))),
         "request_delay": max(0.0, float(sec.get("request_delay", 0))),
         "cookie": (sec.get("cookie") or "").strip(),
     }
@@ -241,7 +320,7 @@ def load_config(path):
 def main():
     ap = argparse.ArgumentParser(description="wenku8 轻小说 txt 批量下载器")
     ap.add_argument("-d", "--download", required=True,
-                    help="下载范围：单个 ID(如 1) 或区间(如 1-1000)")
+                    help="下载规格：单个 ID(如 1)、区间(如 1-1000) 或列表(如 5,68)，可混合(如 1-10,20,30-35)")
     ap.add_argument("-c", "--config", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.ini"),
                     help="配置文件路径（默认脚本同级 config.ini）")
     ap.add_argument("--overwrite", action="store_true", help="强制重下已存在的文件")
@@ -265,11 +344,13 @@ def main():
 
     cores = os.cpu_count()
     threads = cfg["threads"]
-    log(f"CPU 核心数: {cores}，下载线程数: {threads}（config: {args.config}）", "INFO")
+    log(f"CPU 核心数: {cores}，下载线程数: {threads}，限速: {cfg['req_per_min']} 请求/分钟"
+        f"（config: {args.config}）", "INFO")
     log(f"待下载: {len(book_ids)} 本，输出目录: {out_dir}", "INFO")
 
     client = DownloadClient(engine=cfg["engine"], timeout=cfg["timeout"],
-                            retries=cfg["retries"], cookie=cfg["cookie"])
+                            retries=cfg["retries"], cookie=cfg["cookie"],
+                            req_per_min=cfg["req_per_min"], workers=threads)
     delay = cfg["request_delay"]
 
     total = len(book_ids)
