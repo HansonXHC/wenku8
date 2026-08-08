@@ -406,17 +406,78 @@ def fetch_book_info(client, aid):
         raw = client.api_post(f"action=book&do=bookinfo&aid={aid}&t=0")
         root = ET.fromstring(ILLEGAL_XML_RE.sub("", _to_text(raw)))
 
-        def find_text(name):
-            for el in root.iter():
-                tag = el.tag.rsplit("}", 1)[-1]
-                if tag == name and el.text and el.text.strip():
-                    return el.text.strip()
-            return None
-        title, author = find_text("title"), find_text("author")
-        return (title or None), (author or None)
+        title, author = None, None
+        for el in root.iter():
+            tag = el.tag.rsplit("}", 1)[-1]
+            if tag != "data":
+                continue
+            name = el.get("name") or ""
+            if name == "Title":
+                title = (el.text or "").strip() or None
+            elif name == "Author":
+                author = (el.get("value") or "").strip() or None
+        return title, author
     except Exception as e:
         log(f"bookinfo 获取失败: {e}", "WARN")
         return None, None
+
+
+# 页面元数据抓取的常量（书籍页面 https://www.wenku8.cc/book/<aid>.htm）
+PAGE_BOOK_URL = "https://www.wenku8.cc/book/{aid}.htm"
+_PAGE_AUTHOR_RE = re.compile(r"\u5c0f\u8bf4\u4f5c\u8005\uff1a(.*?)</td>", re.S)          # 小说作者：
+_PAGE_DESC_SPLIT = "\u5185\u5bb9\u7b80\u4ecb\uff1a</span>"                              # 内容简介：</span>
+_PAGE_COLLECTION_RE = re.compile(r"\u6587\u5e93\u5206\u7c7b\uff1a(.*?)</td>", re.S)      # 文库分类：
+_BR_RE = re.compile(r"<br\s*/?>", re.I)
+
+
+def _strip_html(s):
+    return re.sub(r"<[^>]+>", "", s).strip()
+
+
+def _extract_page_desc(text):
+    """提取内容简介：保留 <br> 换行为段落换行；无法提取返回 None。"""
+    seg = text.split(_PAGE_DESC_SPLIT, 1)
+    if len(seg) != 2:
+        return None
+    m = re.search(r"<span[^>]*>(.*?)</span>", seg[1], re.S)
+    html = m.group(1) if m else seg[1]
+    html = _BR_RE.sub("\n", html)
+    txt = _strip_html(html)
+    txt = txt.replace("\r\n", "\n").replace("\r", "\n")
+    lines = [re.sub(r"[ \t]+", " ", ln).strip() for ln in txt.split("\n")]
+    lines = [ln for ln in lines if ln]
+    return "\n".join(lines) or None
+
+
+def fetch_page_meta(client, aid):
+    """
+    抓取书籍网页上的 作者 / 内容简介 / 文库分类。
+    返回 (author, description, collection)，各自失败时为 None（不中断流程）。
+    """
+    try:
+        raw = client.get_bytes(PAGE_BOOK_URL.format(aid=aid))
+    except Exception as e:
+        log(f"书籍页面获取失败(book/{aid}.htm): {e}", "WARN")
+        return None, None, None
+    text = None
+    for enc in ("utf-8", "gb18030", "big5"):
+        try:
+            text = raw.decode(enc)
+            break
+        except (UnicodeDecodeError, LookupError):
+            continue
+    if text is None:
+        text = raw.decode("utf-8", "replace")
+
+    author = collection = description = None
+    m = _PAGE_AUTHOR_RE.search(text)
+    if m:
+        author = _strip_html(m.group(1)) or None
+    m = _PAGE_COLLECTION_RE.search(text)
+    if m:
+        collection = _strip_html(m.group(1)) or None
+    description = _extract_page_desc(text)
+    return author, description, collection
 
 
 # ---------------------------------------------------------------------------
@@ -496,16 +557,27 @@ def esc(text):
     return html_mod.escape(str(text), quote=False)
 
 
-def build_epub(aid, title, author, volumes, chapters_text, image_data, cover_data, out_path):
+def build_epub(aid, title, author, volumes, chapters_text, image_data, cover_data, out_path,
+               description=None, collection=None):
     from ebooklib import epub
 
     book = epub.EpubBook()
     book.set_identifier(str(aid))
     book.set_title(title or f"novel_{aid}")
-    book.set_language("zh")
+    book.set_language("zh-Hans")
     if author:
         try:
             book.add_author(author)
+        except Exception:
+            pass
+    if description:
+        try:
+            book.add_metadata("DC", "description", description)
+        except Exception:
+            pass
+    if collection:
+        try:
+            book.add_metadata(None, "meta", collection, {"property": "belongs-to-collection"})
         except Exception:
             pass
 
@@ -548,7 +620,7 @@ def build_epub(aid, title, author, volumes, chapters_text, image_data, cover_dat
             links.append(epub.Link(f"{file_name}#{anchor}", c["name"], f"l-{vi}-{ci}"))
         if not links:
             links.append(epub.Link(file_name, v["name"], f"lv-{vi}"))
-        chapter = epub.EpubHtml(title=v["name"], file_name=file_name, lang="zh", uid=uid)
+        chapter = epub.EpubHtml(title=v["name"], file_name=file_name, lang="zh-Hans", uid=uid)
         chapter.content = "".join(parts)
         chapter.add_link(href="style.css", rel="stylesheet", type="text/css")
         book.add_item(chapter)
@@ -741,7 +813,10 @@ def process_book(txt_path, args, client):
 
     chapters_text, preamble = split_txt(text, volumes)
 
-    title, author = fetch_book_info(client, aid)
+    api_title, api_author = fetch_book_info(client, aid)
+    page_author, description, collection = fetch_page_meta(client, aid)
+    author = page_author or api_author
+    title = api_title
     if not title and preamble:
         for line in preamble:
             m = TITLE_LINE_RE.match(line)
@@ -750,6 +825,12 @@ def process_book(txt_path, args, client):
                 break
     if not title:
         title = os.path.splitext(os.path.basename(txt_path))[0]
+    if author:
+        log(f"作者: {author}", "INFO")
+    if collection:
+        log(f"文库分类: {collection}", "INFO")
+    if description:
+        log(f"内容简介: {description.splitlines()[0][:40]}…（{len(description)} 字符）", "INFO")
 
     # 目标章节
     target_cids = {}
@@ -823,7 +904,8 @@ def process_book(txt_path, args, client):
     os.makedirs(out_dir, exist_ok=True)
     safe_title = safe_name(title or f"novel_{aid}")
     out_path = os.path.join(out_dir, f"{safe_title} - {aid}.epub")
-    build_epub(aid, title, author, volumes, chapters_text, image_data, cover_data, out_path)
+    build_epub(aid, title, author, volumes, chapters_text, image_data, cover_data, out_path,
+               description=description, collection=collection)
     log(f"已生成: {out_path}", "INFO")
 
     problems = validate_epub(out_path)
